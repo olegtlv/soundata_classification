@@ -82,8 +82,6 @@ class AETrainer:
         return total_loss / len(loader.dataset)
 
 # training/trainer_vae.py
-import torch
-import torch.nn.functional as F
 
 def vae_loss(recon, x_clean, mu, logvar, beta=1.0, weights=None):
     # recon, x_clean must match shape (trainer ensures match_size)

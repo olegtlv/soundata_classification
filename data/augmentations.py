@@ -4,9 +4,9 @@ import random
 
 def get_ae_augment():
     return Compose([
-        RandomTimeMask(max_width=40),
-        RandomFreqMask(max_width=20),
-        RandomGain(-6, 6),
+        RandomTimeMask(max_width=20),
+        RandomFreqMask(max_width=10),
+        RandomGain(-3, 3),
         RandomNoise(0.02),
     ])
 
@@ -111,5 +111,31 @@ class ContrastiveAug:
 
         for aug in augs:
             x = aug(x)
+
+        return x
+
+class SafeContrastiveAug:
+    def __call__(self, x):
+        # 1. Mild gaussian noise
+        if random.random() < 0.5:
+            x = x + 0.01 * torch.randn_like(x)
+
+        # 2. Mild gain
+        if random.random() < 0.5:
+            gain_db = random.uniform(-3, 3)
+            factor = 10 ** (gain_db / 20)
+            x = x * factor
+
+        # 3. Small time mask (tiny)
+        if random.random() < 0.3:
+            width = random.randint(0, 5)
+            t = random.randint(0, x.shape[-1] - width)
+            x[:, :, t:t+width] = 0
+
+        # 4. Small freq mask (tiny)
+        if random.random() < 0.3:
+            width = random.randint(0, 3)
+            f = random.randint(0, x.shape[-2] - width)
+            x[:, f:f+width, :] = 0
 
         return x

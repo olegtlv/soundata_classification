@@ -2,6 +2,7 @@
 from torch.utils.data import Dataset
 import torch
 from data.preprocess import preprocess_audio, to_logmel
+import numpy as np
 
 class UrbanSoundDataset(Dataset):
     def __init__(self, clips=None, label2id=None,
@@ -82,7 +83,9 @@ class UrbanSoundDataset(Dataset):
         elif self.mode == "contrastive":
             x1 = self.contrastive_transform(x)
             x2 = self.contrastive_transform(x)
+            x_clean = x.clone()
             return {
+                "x": x_clean,
                 "x1": x1,
                 "x2": x2,
                 "label": label_id,
@@ -103,3 +106,20 @@ class UrbanSoundDataset(Dataset):
             }
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
+
+
+class PseudoLabeledDataset(Dataset):
+    def __init__(self, base_ds, pseudo_labels):
+        assert len(base_ds) == len(pseudo_labels)
+        self.base_ds = base_ds
+        self.pseudo_labels = np.array(pseudo_labels, dtype=np.int64)
+
+    def __len__(self):
+        return len(self.base_ds)
+
+    def __getitem__(self, idx):
+        sample = self.base_ds[idx]
+        x = sample["x"]       # from UrbanSoundDataset
+        # salience/confidence/real label are ignored for DeepCluster-lite
+        pseudo = int(self.pseudo_labels[idx])
+        return x, pseudo

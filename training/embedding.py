@@ -1,5 +1,7 @@
 # training/embedding.py
 import torch
+import torch.nn.functional as F
+
 
 def extract_embeddings(model, loader, device):
     model.eval()
@@ -28,6 +30,7 @@ def extract_embeddings_VAE(model, loader, device):
             label = batch["label"]
 
             z = model.encode(x)[0]
+            z = F.normalize(z, dim=1)
 
             Z.append(z.cpu())
             labels.append(label.cpu())

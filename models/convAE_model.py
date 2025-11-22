@@ -50,3 +50,7 @@ class ConvAutoencoder(nn.Module):
         z = F.normalize(z, dim=1)
         recon = self.decode(z, target_shape=x.shape)
         return recon, z
+
+    def encode_only(self, x):
+        z = self.encode(x)
+        return F.normalize(z, dim=1)
