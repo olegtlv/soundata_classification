@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 
-def extract_embeddings(model, loader, device):
+def extract_embeddings(model, loader, device, normalize=False):
     model.eval()
     Z, labels = [], []
 
@@ -13,6 +13,8 @@ def extract_embeddings(model, loader, device):
             label = batch["label"]
 
             z = model.encode(x)
+            if normalize:
+                z = F.normalize(z, dim=1)
 
             Z.append(z.cpu())
             labels.append(label.cpu())

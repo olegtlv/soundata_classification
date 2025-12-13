@@ -3,16 +3,16 @@ from torch.utils.data import Dataset
 import torch
 from data.preprocess import preprocess_audio, to_logmel
 import numpy as np
+import torch.nn.functional as F
 
 class UrbanSoundDataset(Dataset):
     def __init__(self, clips=None, label2id=None,
                  precomputed_file=None,
-                 transform=None, contrastive_transform=None,
+                 transform=None,
                  mode="ae", folds=None):
         self.data = clips
         self.label2id = label2id
         self.transform = transform
-        self.contrastive_transform = contrastive_transform
         self.mode = mode
 
         if precomputed_file is not None:
@@ -48,7 +48,8 @@ class UrbanSoundDataset(Dataset):
             label_id = self.y[idx]
             salience = getattr(self, "salience", torch.ones_like(label_id, dtype=torch.float32))
             confidence = getattr(self, "confidence", torch.ones_like(label_id, dtype=torch.float32))
-
+            if x.shape[-1] == 126:
+                x = F.pad(x, (1, 1))  # pad time dimension to 128
         # ------------------------
         # On-the-fly mode
         # ------------------------
@@ -65,7 +66,7 @@ class UrbanSoundDataset(Dataset):
         # ------------------------------------------------
         # AE mode: returns x_aug + x_clean
         # ------------------------------------------------
-        if self.mode == "ae":
+        if (self.mode == "ae") | (self.mode == "vae"):
             x_clean = x.clone()
             x_aug = self.transform(x) if self.transform else x
 
@@ -81,11 +82,11 @@ class UrbanSoundDataset(Dataset):
         # Contrastive (SimCLR / BYOL)
         # ------------------------------------------------
         elif self.mode == "contrastive":
-            x1 = self.contrastive_transform(x)
-            x2 = self.contrastive_transform(x)
+            x1 = self.transform(x)
+            x2 = self.transform(x)
             x_clean = x.clone()
             return {
-                "x": x_clean,
+                "x_clean": x_clean,
                 "x1": x1,
                 "x2": x2,
                 "label": label_id,

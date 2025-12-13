@@ -8,6 +8,7 @@ from data.data_access import get_train_test_clips_n_labels, create_label_map
 from data.dataset import UrbanSoundDataset, PseudoLabeledDataset
 from data.augmentations import get_ae_augment
 from models.convAE_model import ConvAutoencoder
+from models.resnetEncoder import ResNetEncoder
 from training.embedding import extract_embeddings
 from training.clustering_eval import evaluate_clustering
 from models.deep_cluster_lite import DeepClusterHead
@@ -23,7 +24,7 @@ train_clips, test_clips, _ = get_train_test_clips_n_labels()
 label2id = create_label_map(train_clips + test_clips)
 n_clusters = cfg.n_clusters  #len(label2id)  # one cluster per class
 
-ae_transform = get_ae_augment()  # same as in main
+ae_transform = None #get_ae_augment()  # same as in main
 
 train_ds = UrbanSoundDataset(
     clips=train_clips,
@@ -49,16 +50,27 @@ test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False)
 # ============================
 # 2. Load pretrained AE encoder
 # ============================
-ae = ConvAutoencoder(latent_dim=cfg.latent_dim).to(device)
-state = torch.load(r"C:\data\models\audio_AE_151125aug_norm_50e", map_location=device)
+# ae = ConvAutoencoder(latent_dim=cfg.latent_dim).to(device)
+ae = ResNetEncoder(latent_dim=cfg.latent_dim).to(device)
+
+# state = torch.load(r"C:\data\models\audio_ae_sim_tuned_291125.pth", map_location=device)
+state = torch.load(r"C:\data\models\ae_resnet_061225_2.pth", map_location=device)
 ae.load_state_dict(state)
+# ---- FREEZE early encoder layers ----
+def freeze(module):
+    for p in module.parameters():
+        p.requires_grad = False
+
+# freeze(ae.enc1)
+# freeze(ae.enc2)
+
 encoder = ae  # we'll keep updating this reference
 encoder.eval()
 
 # Baseline AE performance (before DeepCluster)
 with torch.no_grad():
     Z_test_ae, y_test_ae = extract_embeddings(encoder, test_loader, device)
-base_nmi, base_ari, _ = evaluate_clustering(Z_test_ae, y_test_ae, n_clusters=n_clusters)
+base_nmi, base_ari, preds, all_results  = evaluate_clustering(Z_test_ae, y_test_ae, base_k=cfg.n_clusters, k_multipliers=(1, 2, 3))
 print(f"[Baseline AE] NMI = {base_nmi:.4f}, ARI = {base_ari:.4f}")
 
 # ============================
@@ -87,7 +99,8 @@ for it in range(num_iters):
     # 3c. Pseudo-labeled dataset / loader
     dc_train_ds = PseudoLabeledDataset(train_ds, cluster_ids_train)
     dc_train_loader = DataLoader(dc_train_ds, batch_size=cfg.batch_size, shuffle=True)
-
+    # freeze(encoder.enc1)
+    # freeze(encoder.enc2)
     # 3d. New DeepCluster head on top of current encoder
     dc_model = DeepClusterHead(encoder, cfg.latent_dim, n_clusters).to(device)
     # reinit head to avoid label-permutation issues
@@ -95,8 +108,8 @@ for it in range(num_iters):
 
     # different LRs: slow for encoder, fast for head
     optimizer = torch.optim.Adam([
-        {"params": dc_model.encoder.parameters(), "lr": 5e-5},
-        {"params": dc_model.head.parameters(), "lr": 1e-3},
+        {"params": dc_model.encoder.parameters(), "lr": 2e-6},
+        {"params": dc_model.head.parameters(), "lr": 2e-4},
     ])
 
     # 3e. Train encoder + head on pseudo-labels
@@ -112,7 +125,7 @@ for it in range(num_iters):
     encoder.eval()
     with torch.no_grad():
         Z_test_iter, y_test_iter = extract_embeddings(encoder, test_loader, device)
-    nmi_iter, ari_iter, _ = evaluate_clustering(Z_test_iter, y_test_iter, n_clusters=n_clusters)
+    nmi_iter, ari_iter, preds, all_results  = evaluate_clustering(Z_test_iter, y_test_iter, base_k=cfg.n_clusters, k_multipliers=(1, 2, 3, 4, 5,6),)
     print(f"[Iter {it + 1}] NMI = {nmi_iter:.4f}, ARI = {ari_iter:.4f}")
 
 # ============================
@@ -122,7 +135,7 @@ encoder.eval()
 with torch.no_grad():
     Z_test_dc, y_test_dc = extract_embeddings(encoder, test_loader, device)
 
-final_nmi, final_ari, _ = evaluate_clustering(Z_test_dc, y_test_dc, n_clusters=n_clusters)
+final_nmi, final_ari, preds, all_results  = evaluate_clustering(Z_test_dc, y_test_dc,base_k=cfg.n_clusters,  k_multipliers=(1, 2, 3, 4, 5,6),)
 print(f"\n[Final DeepCluster-lite] NMI = {final_nmi:.4f}, ARI = {final_ari:.4f}")
 print(f"[Baseline AE         ] NMI = {base_nmi:.4f}, ARI = {base_ari:.4f}")
 print()

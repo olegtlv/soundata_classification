@@ -1,6 +1,15 @@
 from training.contrastive_loss import contrastive_loss
+from training.trainer_ae import compute_combined_loss
 import torch.nn.functional as F
 from tqdm import tqdm
+import torch
+def freeze(module):
+    for p in module.parameters():
+        p.requires_grad = False
+
+def unfreeze(module):
+    for p in module.parameters():
+        p.requires_grad = True
 
 class SimCLRrainer:
     def __init__(self, model, optimizer, device, temperature=0.5, lambda_recon=0.1):
@@ -10,9 +19,14 @@ class SimCLRrainer:
         self.temperature = temperature
         self.lambda_recon = lambda_recon
 
-    def train_epoch(self, loader):
+    def train_epoch(self, loader, epoch):
         self.model.train()
         total_loss = 0
+
+        if epoch < 10:
+            freeze(self.model.encoder)
+        else:
+            unfreeze(self.model.encoder)
 
         for batch in tqdm(loader):
             x1 = batch["x1"].to(self.device).float()
@@ -31,14 +45,18 @@ class SimCLRrainer:
             # ensure x, x_clean in [0,1] (if not, scale prior to training)
             con_loss  = contrastive_loss(p1,p2, weights=None, temperature=self.temperature)
             # reconstruction loss
-            if x_clean is not None:
-                recon, _ = self.model.encoder(x_clean)   # AE forward
-                recon_loss = F.mse_loss(recon, x_clean)
-            else:
-                recon_loss = 0.0
+            # if x_clean is not None:
+            #     recon, _ = self.model.encoder(x_clean)   # AE forward
+            #     recon_loss, _, _, _ = compute_combined_loss(
+            #         recon, x_clean, weights=None, alpha=0.84)
+            # else:
+            #     recon_loss = 0.0
+            #
+            # std_z = torch.std(torch.cat([p1, p2], dim=0), dim=0)
+            # var_loss = torch.mean(F.relu(1 - std_z))
+            # loss = con_loss + self.lambda_recon * recon_loss + 0.04 * var_loss
 
-            loss = con_loss + self.lambda_recon * recon_loss
-
+            loss = con_loss
             loss.backward()
             self.optimizer.step()
 

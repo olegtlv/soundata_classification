@@ -3,50 +3,89 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from pytorch_msssim import ms_ssim  # pip install pytorch-msssim
 from pytorch_msssim import ssim
+from training.contrastive_loss import contrastive_loss
+
+
+def _match_size(a, b):
+    """
+    Center-crop tensors a and b to the same (H,W).
+    a, b: [B,C,H,W]
+    Returns: (a_cropped, b_cropped)
+    """
+    B, C, H1, W1 = a.shape
+    _, _, H2, W2 = b.shape
+    H = min(H1, H2)
+    W = min(W1, W2)
+
+    # crop starts (center crop)
+    h1s = (H1 - H) // 2
+    w1s = (W1 - W) // 2
+    h2s = (H2 - H) // 2
+    w2s = (W2 - W) // 2
+
+    a = a[:, :, h1s:h1s+H, w1s:w1s+W]
+    b = b[:, :, h2s:h2s+H, w2s:w2s+W]
+    return a, b
+
 
 def compute_combined_loss(recon, x_clean, weights=None, alpha=0.84):
     """
-    recon, x_clean: [B, C, H, W] torch tensors, in range [0,1]
-    weights: [B] or None  -- will be normalized to mean=1 if provided
-    alpha: weight for SSIM term (0..1)
+    recon, x_clean: [B,C,H,W] tensors in range [0,1].
+    alpha: weight for SSIM term.
+    weights: optional per-sample confidence weights.
+
+    Returns:
+        loss_scalar, avg_loss, avg_ssim_loss, avg_mse_loss
     """
-    # --- ensure inputs are in [0,1] ---
-    # If your x_clean is already in [0,1] skip this. Otherwise linearly scale per-sample:
-    # x_min = x_clean.view(B, -1).min(dim=1)[0]; x_max = x_clean.view(B,-1).max(dim=1)[0]
-    # but recommended: ensure preprocessing produces logmels scaled to [0,1] before saving/cache.
 
-    B = recon.shape[0]
+    # ---------------------------------------------------
+    # 1. Crop recon + x_clean to the same size (SSIM requirement)
+    # ---------------------------------------------------
+    recon, x_clean = _match_size(recon, x_clean)
 
-    # MS-SSIM returns mean over batch if size_average=True; we want per-sample scores.
-    # pytorch-msssim supports size_average=False to get per-sample values.
+    B = recon.size(0)
+
+    # ---------------------------------------------------
+    # 2. SSIM loss (per sample)
+    # ---------------------------------------------------
     ssim_vals = ssim(
         recon, x_clean,
         data_range=1.0,
-        size_average=False,
+        size_average=False,  # get [B]
         win_size=7
     )
-    # convert to "loss" form: (1 - ssim)
     ssim_loss_per_sample = 1.0 - ssim_vals  # [B]
 
-    # per-sample MSE
-    mse_per_elem = F.mse_loss(recon, x_clean, reduction='none')  # [B,C,H,W]
-    mse_per_sample = mse_per_elem.view(B, -1).mean(dim=1)         # [B]
+    # ---------------------------------------------------
+    # 3. MSE loss (per sample)
+    # ---------------------------------------------------
+    mse_vals = F.mse_loss(recon, x_clean, reduction="none")   # [B,C,H,W]
+    mse_loss_per_sample = mse_vals.view(B, -1).mean(dim=1)    # [B]
 
-    # combined per-sample loss
-    per_sample = alpha * ssim_loss_per_sample + (1.0 - alpha) * mse_per_sample
+    # ---------------------------------------------------
+    # 4. Combine losses
+    # ---------------------------------------------------
+    per_sample = alpha * ssim_loss_per_sample + (1 - alpha) * mse_loss_per_sample
 
-    # apply sample weights (normalize to mean = 1)
+    # ---------------------------------------------------
+    # 5. Optional per-sample weights (normalized to mean=1)
+    # ---------------------------------------------------
     if weights is not None:
         w = weights.to(per_sample.device).float()
         w = w / (w.mean() + 1e-9)
         per_sample = per_sample * w
 
-    # final scalar loss
+    # ---------------------------------------------------
+    # 6. Final scalar
+    # ---------------------------------------------------
     loss = per_sample.mean()
-    return loss, per_sample.mean().item(), ssim_loss_per_sample.mean().item(), mse_per_sample.mean().item()
 
-
-
+    return (
+        loss,
+        per_sample.mean().item(),
+        ssim_loss_per_sample.mean().item(),
+        mse_loss_per_sample.mean().item()
+    )
 
 class AETrainer:
     def __init__(self, model, optimizer, device):
@@ -54,17 +93,52 @@ class AETrainer:
         self.optimizer = optimizer
         self.device = device
 
-    def train_epoch(self, loader):
+    # def train_with_contrastive(self, loader):
+    #     self.model.train()
+    #     total_loss = 0
+    #
+    #     for batch in loader:
+    #         x1 = batch["x1"].to(self.device)
+    #         x2 = batch["x2"].to(self.device)
+    #         clean = batch["x"].to(self.device)
+    #
+    #         # --- AE reconstruction ---
+    #         recon, z1 = self.model(x1)
+    #         loss_recon, avg_total, avg_ssim, avg_mse = compute_combined_loss(recon, clean)
+    #
+    #         # --- second view encoding (no decode needed) ---
+    #         with torch.no_grad():
+    #             _, z2 = self.model(x2)
+    #
+    #         # --- weak contrastive ---
+    #         loss_contrast = contrastive_loss(z1, z2)
+    #
+    #         # --- combined ---
+    #         loss = loss_recon + 0.05 * loss_contrast
+    #
+    #         self.optimizer.zero_grad()
+    #         loss.backward()
+    #         self.optimizer.step()
+    #
+    #     return total_loss / len(loader.dataset)
+
+    def train_epoch(self, loader, epoch):
         self.model.train()
         total_loss = 0
 
         for batch in tqdm(loader):
-            x = batch["x"].to(self.device).float()
+            x = batch["x1"].to(self.device).float()
+            x2 = batch["x2"].to(self.device)
+
             x_clean = batch["x_clean"].to(self.device).float()
 
             self.optimizer.zero_grad()
 
-            recon, _ = self.model(x)
+            recon, z1 = self.model(x)
+            _, z2 = self.model(x2)
+
+            loss_contrast = contrastive_loss(z1, z2)
+
             weights = batch['confidence'].to(self.device)
             weights = torch.clamp(weights, min=0.5)  # min weight 0.5
             # loss = (F.mse_loss(recon, x_clean, reduction='none') * weights.view(-1, 1, 1, 1)).mean()
@@ -73,6 +147,7 @@ class AETrainer:
             loss, avg_per_sample, avg_ssim_loss, avg_mse = compute_combined_loss(
                 recon, x_clean, weights=weights, alpha=0.84
             )
+            loss = loss + 0.05 * loss_contrast
 
             loss.backward()
             self.optimizer.step()
@@ -119,7 +194,7 @@ class VAETrainer:
         for batch in loader:
             # depending on dataset dict fields
             x = batch["x"].to(self.device).float()
-            x_clean = batch["x_clean"].to(self.device).float()
+            x_clean = batch["x"].to(self.device).float()
             # optional weights (prefer confidence or salience)
             conf = batch.get("confidence", None)
             sal = batch.get("salience", None)

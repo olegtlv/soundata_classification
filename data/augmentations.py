@@ -139,3 +139,45 @@ class SafeContrastiveAug:
             x[:, f:f+width, :] = 0
 
         return x
+
+class StrongContrastiveAug:
+    """
+    Stronger augmentation for SimCLR-style training on log-mels.
+
+    - Random time crop to a fixed number of frames
+    - Time mask (up to ~25% of time axis)
+    - Freq mask (up to ~20% of mel bins)
+    - Random gain
+    - Random Gaussian noise
+    """
+    def __init__(self, target_frames=128):
+        self.target_frames = target_frames
+        self.crop = RandomCrop(target_frames)
+        # use a bit stronger masks than SafeContrastiveAug
+        self.time_mask = RandomTimeMask(max_width=10)
+        self.freq_mask = RandomFreqMask(max_width=12)
+        self.gain = RandomGain(-6, 6)
+        self.noise = RandomNoise(0.02)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [1, F, T] or [B, 1, F, T] depending on how you call it;
+        # in your Dataset it's [1, F, T]
+        x = self.crop(x)  # ensure fixed T = target_frames
+
+        # time mask ~80% of the time
+        if random.random() < 0.8:
+            x = self.time_mask(x)
+
+        # freq mask ~80% of the time
+        if random.random() < 0.8:
+            x = self.freq_mask(x)
+
+        # gain ~50% of the time
+        if random.random() < 0.5:
+            x = self.gain(x)
+
+        # noise ~70% of the time
+        if random.random() < 0.7:
+            x = self.noise(x)
+
+        return x
