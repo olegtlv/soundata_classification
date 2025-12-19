@@ -20,7 +20,7 @@ class ConvAutoencoder(nn.Module):
         padding: int = 1,
         use_bn: bool = True,
         normalize_latent: bool = True,
-        output_activation: str = "sigmoid",  # "sigmoid" or "none"
+        output_activation: str = "none",  # "sigmoid" or "none"
         input_hw=(64, 128),  # (H, W) used to build FC layers
     ):
         super().__init__()
@@ -114,4 +114,5 @@ class ConvAutoencoder(nn.Module):
 
     def encode_only(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encode(x)
-        return F.normalize(z, dim=1) if self.normalize_latent else z
+        # return F.normalize(z, dim=1) if self.normalize_latent els1e z
+        return F.normalize(z, dim=1)

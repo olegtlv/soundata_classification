@@ -17,6 +17,8 @@ from training.trainer_ae import AETrainer, VAETrainer
 from training.trainer_simclr import SimCLRrainer
 from training.embedding import extract_embeddings, extract_embeddings_VAE
 from training.clustering_eval import evaluate_clustering, visualize_embeddings_tsne, per_class_cluster_report
+from models.byol_model import BYOLModel
+from training.trainer_byol import BYOLTrainer
 
 # ======================================================
 # Load config
@@ -47,8 +49,9 @@ label2id = create_label_map(train_clips + test_clips)
 # )
 # if cfg.model_type == 'contrastive':
 # aug = SafeContrastiveAug()
-aug = StrongContrastiveAug()
-# aug = get_ae_augment()
+# aug = StrongContrastiveAug()
+aug = get_ae_augment() if cfg.model_type in ['ae', 'vae'] else StrongContrastiveAug()
+
 train_ds = UrbanSoundDataset(
     clips=train_clips,
     label2id=label2id,
@@ -99,7 +102,7 @@ def freeze(module):
         p.requires_grad = False
 
 if cfg.model_type == 'ae':
-    model = ConvAutoencoderSE(latent_dim=cfg.latent_dim).to(device)
+    model = ConvAutoencoder(latent_dim=cfg.latent_dim).to(device)
     # model = ConvAutoencoder_v2(latent_dim=cfg.latent_dim, input_size=(1, 64, 126)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     trainer = AETrainer(model, optimizer, device)
@@ -113,19 +116,37 @@ elif cfg.model_type == 'contrastive':
     ## state = torch.load(r"C:\data\models\audio_ae_v2_281125.pth", map_location=device)
     ## ae.load_state_dict(state)
     ## ae = ConvAutoencoder_v2(latent_dim=cfg.latent_dim, input_size=(1, 64, 126)).to(device)
-    state = torch.load(r"C:\data\models\audio_ae_121225_128_params.pth", map_location=device)
-    ae.load_state_dict(state)
+    # state = torch.load(r"C:\data\models\audio_ae_141225.pth", map_location=device)
+    # ae.load_state_dict(state)
 
     # freeze(ae.enc1)
     # freeze(ae.enc2)
-    resencoder = ResNetEncoder(latent_dim=cfg.latent_dim, depth="layer2", pretrained=True).to(device)
+    resencoder = ResNetEncoder(latent_dim=cfg.latent_dim, depth="layer2", pretrained=cfg.pretrained).to(device)
     model = SimCLRModel(ae_backbone=resencoder, latent_dim=cfg.latent_dim).to(device)
     # load AE weights into the encoder part
     optimizer = torch.optim.Adam([
-        {"params": model.encoder.parameters(), "lr": cfg.lr/3},
+        {"params": model.encoder.parameters(), "lr": cfg.lr / (6 if cfg.pretrained else 3)},
         {"params": model.projector.parameters(), "lr": cfg.lr},
     ])
-    trainer = SimCLRrainer(model, optimizer, device, temperature=0.3)
+    trainer = SimCLRrainer(model, optimizer, device, temperature=0.5)
+elif cfg.model_type=='byol':
+    res_encoder = ResNetEncoder(latent_dim=cfg.latent_dim, depth="layer2", pretrained=True).to(device)
+    state = torch.load(r"C:\data\models\ae_resnet_181225.pth", map_location=device)
+    res_encoder.load_state_dict(state)
+    # ae_encoder = ConvAutoencoder(latent_dim=cfg.latent_dim).to(device)
+    # state = torch.load(r"C:\data\models\audio_ae_131225.pth", map_location=device)
+    # ae_encoder.load_state_dict(state)
+    model = BYOLModel(
+        encoder=res_encoder,
+        latent_dim=cfg.latent_dim,
+        proj_dim=128,
+        proj_hidden=256,
+        pred_hidden=256,
+        ema_m=0.996,
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
+    trainer = BYOLTrainer(model, optimizer, device, total_epochs=cfg.epochs, ema_base=0.996)
 
 warmup_epochs = 5
 def warmup_lr(epoch, warmup_epochs=warmup_epochs):
@@ -142,10 +163,10 @@ for epoch in range(cfg.epochs):
     # train_loss = trainer.train_with_contrastive(train_loader)
     train_loss = trainer.train_epoch(train_loader, epoch)
 
-    if epoch < warmup_epochs:
-        warmup.step()
-    else:
-        scheduler.step()
+    # if epoch < warmup_epochs:
+    #     warmup.step()
+    # else:
+    # scheduler.step()
 
     print(f"[Epoch {epoch+1}] LR = {scheduler.get_last_lr()[0]:.6f}, Loss = {train_loss:.4f}")
 
@@ -156,19 +177,22 @@ for epoch in range(cfg.epochs):
             Z, labels = extract_embeddings_VAE(model, test_loader, device)
         elif cfg.model_type == 'contrastive':
             Z, labels = extract_embeddings(model.encoder, test_loader, device, normalize=True)
+        elif cfg.model_type == 'byol':
+            Z, labels = extract_embeddings(model.online_encoder, test_loader, device, normalize=True)
         nmi, ari, preds, all_results  = evaluate_clustering(Z,
                                               labels,
                                               base_k=len(label2id),
                                               method="kmeans",
-                                              k_multipliers=(1, )
+                                              k_multipliers=(1, 2, 3)
                                               )
-        print("Final NMI =", nmi, "Final ARI =", ari)
+        for k, res in all_results.items():
+            print(f"k={k:3d}  NMI={res['nmi']:.3f}  ARI={res['ari']:.3f}")
 
 
 if cfg.model_type == 'contrastive':
-    torch.save(model.encoder.state_dict(), r"C:\data\models\ae_resnet_121225_2l.pth")
+    torch.save(model.encoder.state_dict(), r"C:\data\models\ae_resnet_181225.pth")
 else:
-    torch.save(model.state_dict(), r"C:\data\models\audio_ae_061225_5.pth")
+    torch.save(model.state_dict(), r"C:\data\models\audio_ae_141225.pth")
 
 # ======================================================
 # Embeddings + Clustering
@@ -178,7 +202,7 @@ if cfg.model_type == 'ae':
 elif cfg.model_type == 'vae':
     Z, labels = extract_embeddings_VAE(model, test_loader, device)
 elif cfg.model_type == 'contrastive':
-    Z, labels = extract_embeddings(model.encoder, test_loader, device, normalize=True)
+    Z, labels = extract_embeddings(model.target_encoder, test_loader, device, normalize=True)
 
 # nmi, ari, preds = evaluate_clustering(Z, labels, n_clusters=len(label2id)*3)
 visualize_embeddings_tsne(model.encoder, test_loader, r"C:\tmp\encoded_tsne2.html", perplexity=12)

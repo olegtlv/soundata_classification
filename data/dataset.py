@@ -75,7 +75,8 @@ class UrbanSoundDataset(Dataset):
                 "x_clean": x_clean,
                 "label": label_id,
                 "salience": salience,
-                "confidence": confidence
+                "confidence": confidence,
+                "index": idx
             }
 
         # ------------------------------------------------
@@ -91,7 +92,8 @@ class UrbanSoundDataset(Dataset):
                 "x2": x2,
                 "label": label_id,
                 "salience": salience,
-                "confidence": confidence
+                "confidence": confidence,
+                "index": idx
             }
         # ------------------------------------------------
         # Supervised classifier
@@ -103,7 +105,8 @@ class UrbanSoundDataset(Dataset):
                 "x": x,
                 "label": label_id,
                 "salience": salience,
-                "confidence": confidence
+                "confidence": confidence,
+                "index": idx
             }
         else:
             raise ValueError(f"Unknown mode: {self.mode}")

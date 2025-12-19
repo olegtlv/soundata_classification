@@ -28,7 +28,7 @@ def _match_size(a, b):
     return a, b
 
 
-def compute_combined_loss(recon, x_clean, weights=None, alpha=0.84):
+def compute_combined_loss(recon, x_clean, weights=None, alpha=0.1):
     """
     recon, x_clean: [B,C,H,W] tensors in range [0,1].
     alpha: weight for SSIM term.
@@ -48,18 +48,25 @@ def compute_combined_loss(recon, x_clean, weights=None, alpha=0.84):
     # ---------------------------------------------------
     # 2. SSIM loss (per sample)
     # ---------------------------------------------------
+    x_min = x_clean.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]
+    x_max = x_clean.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+    x_n = (x_clean - x_min) / (x_max - x_min + 1e-6)
+    x_min = recon.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]
+    x_max = recon.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+    r_n = (recon - x_min) / (x_max - x_min + 1e-6)
+
     ssim_vals = ssim(
-        recon, x_clean,
+        r_n, x_n,
         data_range=1.0,
         size_average=False,  # get [B]
-        win_size=7
+        win_size=5
     )
     ssim_loss_per_sample = 1.0 - ssim_vals  # [B]
 
     # ---------------------------------------------------
     # 3. MSE loss (per sample)
     # ---------------------------------------------------
-    mse_vals = F.mse_loss(recon, x_clean, reduction="none")   # [B,C,H,W]
+    mse_vals = F.l1_loss(recon, x_clean, reduction="none")   # [B,C,H,W]
     mse_loss_per_sample = mse_vals.view(B, -1).mean(dim=1)    # [B]
 
     # ---------------------------------------------------
@@ -145,7 +152,7 @@ class AETrainer:
 
             # ensure x, x_clean in [0,1] (if not, scale prior to training)
             loss, avg_per_sample, avg_ssim_loss, avg_mse = compute_combined_loss(
-                recon, x_clean, weights=weights, alpha=0.84
+                recon, x_clean, weights=weights, alpha=0.05
             )
             loss = loss + 0.05 * loss_contrast
 

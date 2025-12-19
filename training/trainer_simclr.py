@@ -38,25 +38,25 @@ class SimCLRrainer:
             p1 = self.model(x1)      # [B, D]
             p2 = self.model(x2)      # [B, D]
 
-            # weights = batch['confidence'].to(self.device)
-            # weights = torch.clamp(weights, min=0.5)  # min weight 0.5
+            weights = batch['confidence'].to(self.device)
+            weights = torch.clamp(weights, min=0.5)  # min weight 0.5
             # loss = (F.mse_loss(recon, x_clean, reduction='none') * weights.view(-1, 1, 1, 1)).mean()
 
             # ensure x, x_clean in [0,1] (if not, scale prior to training)
-            con_loss  = contrastive_loss(p1,p2, weights=None, temperature=self.temperature)
+            con_loss  = contrastive_loss(p1, p2, weights=None, temperature=self.temperature)
             # reconstruction loss
-            # if x_clean is not None:
-            #     recon, _ = self.model.encoder(x_clean)   # AE forward
-            #     recon_loss, _, _, _ = compute_combined_loss(
-            #         recon, x_clean, weights=None, alpha=0.84)
-            # else:
-            #     recon_loss = 0.0
+            if x_clean is not None:
+                recon, _ = self.model.encoder(x_clean)   # AE forward
+                recon_loss, _, _, _ = compute_combined_loss(
+                    recon, x_clean, weights=weights, alpha=0.9)
+            else:
+                recon_loss = 0.0
             #
             # std_z = torch.std(torch.cat([p1, p2], dim=0), dim=0)
             # var_loss = torch.mean(F.relu(1 - std_z))
-            # loss = con_loss + self.lambda_recon * recon_loss + 0.04 * var_loss
+            loss = con_loss + self.lambda_recon * recon_loss #+ 0.04 * var_loss
 
-            loss = con_loss
+            # loss = con_loss
             loss.backward()
             self.optimizer.step()
 

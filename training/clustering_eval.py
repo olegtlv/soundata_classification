@@ -97,7 +97,7 @@ def evaluate_clustering(
         elif method == "gmm":
             clusterer = GaussianMixture(
                 n_components=k,
-                covariance_type="diag",
+                covariance_type="tied",
                 random_state=random_state,
             )
             preds = clusterer.fit(Z).predict(Z)

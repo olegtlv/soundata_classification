@@ -140,43 +140,113 @@ class SafeContrastiveAug:
 
         return x
 
-class StrongContrastiveAug:
-    """
-    Stronger augmentation for SimCLR-style training on log-mels.
 
-    - Random time crop to a fixed number of frames
-    - Time mask (up to ~25% of time axis)
-    - Freq mask (up to ~20% of mel bins)
-    - Random gain
-    - Random Gaussian noise
-    """
-    def __init__(self, target_frames=128):
+class RandomTimeShift:
+    def __init__(self, max_shift=12, pad_value=0.0):
+        self.max_shift = int(max_shift)
+        self.pad_value = pad_value
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [1, F, T]
+        if self.max_shift <= 0:
+            return x
+        shift = random.randint(-self.max_shift, self.max_shift)
+        if shift == 0:
+            return x
+
+        _, F, T = x.shape
+        out = x.new_full((1, F, T), self.pad_value)
+
+        if shift > 0:
+            out[:, :, shift:] = x[:, :, : T - shift]
+        else:
+            s = -shift
+            out[:, :, : T - s] = x[:, :, s:]
+        return out
+
+
+class RandomFreqShift:
+    def __init__(self, max_shift=2, pad_value=0.0):
+        self.max_shift = int(max_shift)
+        self.pad_value = pad_value
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [1, F, T]
+        if self.max_shift <= 0:
+            return x
+        shift = random.randint(-self.max_shift, self.max_shift)
+        if shift == 0:
+            return x
+
+        _, F, T = x.shape
+        out = x.new_full((1, F, T), self.pad_value)
+
+        if shift > 0:
+            out[:, shift:, :] = x[:, : F - shift, :]
+        else:
+            s = -shift
+            out[:, : F - s, :] = x[:, s:, :]
+        return out
+
+class EnergyBiasedRandomCrop:
+    def __init__(self, target_frames=128, bias_prob=0.7):
         self.target_frames = target_frames
-        self.crop = RandomCrop(target_frames)
-        # use a bit stronger masks than SafeContrastiveAug
-        self.time_mask = RandomTimeMask(max_width=10)
-        self.freq_mask = RandomFreqMask(max_width=12)
+        self.bias_prob = bias_prob
+
+    def __call__(self, x):
+        # x: [1, F, T]
+        _, F, T = x.shape
+        if T <= self.target_frames:
+            return x
+
+        if random.random() < self.bias_prob:
+            # energy over time
+            energy = x.mean(dim=1).squeeze(0)  # [T]
+            energy = torch.nn.functional.avg_pool1d(
+                energy[None, None, :],
+                kernel_size=5,
+                stride=1,
+                padding=2,
+            ).squeeze()
+
+            # sample center with probability proportional to energy
+            probs = energy / (energy.sum() + 1e-6)
+            center = torch.multinomial(probs, 1).item()
+            start = max(0, min(center - self.target_frames // 2, T - self.target_frames))
+        else:
+            start = random.randint(0, T - self.target_frames)
+
+        return x[:, :, start : start + self.target_frames]
+
+
+class StrongContrastiveAug:
+    def __init__(self, target_frames=128):
+        self.crop = EnergyBiasedRandomCrop(target_frames)
+        self.tshift = RandomTimeShift(max_shift=12)
+        self.fshift = RandomFreqShift(max_shift=2)
+        self.time_mask = RandomTimeMask(max_width=8)
+        self.freq_mask = RandomFreqMask(max_width=10)
         self.gain = RandomGain(-6, 6)
         self.noise = RandomNoise(0.02)
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [1, F, T] or [B, 1, F, T] depending on how you call it;
-        # in your Dataset it's [1, F, T]
-        x = self.crop(x)  # ensure fixed T = target_frames
+    def __call__(self, x):
+        x = self.crop(x)
 
-        # time mask ~80% of the time
         if random.random() < 0.8:
+            x = self.tshift(x)
+
+        if random.random() < 0.3:
+            x = self.fshift(x)
+
+        if random.random() < 0.3:
             x = self.time_mask(x)
 
-        # freq mask ~80% of the time
-        if random.random() < 0.8:
+        if random.random() < 0.9:
             x = self.freq_mask(x)
 
-        # gain ~50% of the time
         if random.random() < 0.5:
             x = self.gain(x)
 
-        # noise ~70% of the time
         if random.random() < 0.7:
             x = self.noise(x)
 

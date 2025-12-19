@@ -51,20 +51,23 @@ test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False)
 # 2. Load pretrained AE encoder
 # ============================
 # ae = ConvAutoencoder(latent_dim=cfg.latent_dim).to(device)
-ae = ResNetEncoder(latent_dim=cfg.latent_dim).to(device)
+# ae = ResNetEncoder(latent_dim=cfg.latent_dim).to(device)
+res_encoder = ResNetEncoder(latent_dim=cfg.latent_dim, depth="layer2", pretrained=True).to(device)
 
 # state = torch.load(r"C:\data\models\audio_ae_sim_tuned_291125.pth", map_location=device)
-state = torch.load(r"C:\data\models\ae_resnet_061225_2.pth", map_location=device)
-ae.load_state_dict(state)
+state = torch.load(r"C:\data\models\ae_resnet_181225.pth", map_location=device)
+res_encoder.load_state_dict(state)
 # ---- FREEZE early encoder layers ----
 def freeze(module):
     for p in module.parameters():
         p.requires_grad = False
-
+def unfreeze(module):
+    for p in module.parameters():
+        p.requires_grad = True
 # freeze(ae.enc1)
 # freeze(ae.enc2)
 
-encoder = ae  # we'll keep updating this reference
+encoder = res_encoder  # we'll keep updating this reference
 encoder.eval()
 
 # Baseline AE performance (before DeepCluster)
@@ -77,20 +80,26 @@ print(f"[Baseline AE] NMI = {base_nmi:.4f}, ARI = {base_ari:.4f}")
 # 3. DeepCluster iterations
 # ============================
 criterion = nn.CrossEntropyLoss()
-num_iters = 3          # number of DeepCluster iterations
-epochs_per_iter = 10   # epochs per iteration
+num_iters = 5          # number of DeepCluster iterations
+epochs_per_iter = 5   # epochs per iteration
 
 for it in range(num_iters):
     print(f"\n=== DeepCluster iteration {it + 1}/{num_iters} ===")
 
     # 3a. Extract embeddings with current encoder
     encoder.eval()
+    if it == 0:
+        freeze(encoder)
+    else:
+        unfreeze(encoder)
+
     with torch.no_grad():
         Z_train, _ = extract_embeddings(encoder, train_loader, device)
 
     # 3b. K-means on train embeddings -> pseudo-labels
+    f = 4
     kmeans = KMeans(
-        n_clusters=n_clusters,
+        n_clusters=n_clusters*f,
         n_init=20,
         random_state=0
     )
@@ -102,14 +111,14 @@ for it in range(num_iters):
     # freeze(encoder.enc1)
     # freeze(encoder.enc2)
     # 3d. New DeepCluster head on top of current encoder
-    dc_model = DeepClusterHead(encoder, cfg.latent_dim, n_clusters).to(device)
+    dc_model =  DeepClusterHead(encoder, cfg.latent_dim, n_clusters*f).to(device)
     # reinit head to avoid label-permutation issues
     dc_model.head.reset_parameters()
 
     # different LRs: slow for encoder, fast for head
     optimizer = torch.optim.Adam([
-        {"params": dc_model.encoder.parameters(), "lr": 2e-6},
-        {"params": dc_model.head.parameters(), "lr": 2e-4},
+        {"params": dc_model.encoder.parameters(), "lr": 1e-5},
+        {"params": dc_model.head.parameters(), "lr": 1e-3},
     ])
 
     # 3e. Train encoder + head on pseudo-labels
@@ -126,7 +135,8 @@ for it in range(num_iters):
     with torch.no_grad():
         Z_test_iter, y_test_iter = extract_embeddings(encoder, test_loader, device)
     nmi_iter, ari_iter, preds, all_results  = evaluate_clustering(Z_test_iter, y_test_iter, base_k=cfg.n_clusters, k_multipliers=(1, 2, 3, 4, 5,6),)
-    print(f"[Iter {it + 1}] NMI = {nmi_iter:.4f}, ARI = {ari_iter:.4f}")
+    for k, res in all_results.items():
+        print(f"k={k:3d}  NMI={res['nmi']:.3f}  ARI={res['ari']:.3f}")
 
 # ============================
 # 4. Final evaluation

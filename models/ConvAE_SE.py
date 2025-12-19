@@ -3,32 +3,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SqueezeExcite(nn.Module):
-    """Lightweight channel attention (SE)."""
+class SpatialGate(nn.Module):
+    """Simple spatial attention: produces a (B,1,H,W) mask."""
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, 1, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        m = torch.sigmoid(self.conv(x))
+        return x * m
+
+
+class ResidualSE(nn.Module):
+    """SE with residual path to prevent over-suppression."""
     def __init__(self, channels: int, reduction: int = 16):
         super().__init__()
         hidden = max(4, channels // reduction)
-        self.fc1 = nn.Conv2d(channels, hidden, kernel_size=1)
-        self.fc2 = nn.Conv2d(hidden, channels, kernel_size=1)
+        self.fc1 = nn.Conv2d(channels, hidden, 1)
+        self.fc2 = nn.Conv2d(hidden, channels, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        s = x.mean(dim=(2, 3), keepdim=True)          # GAP
+        s = x.mean(dim=(2, 3), keepdim=True)
         s = F.relu(self.fc1(s), inplace=True)
         s = torch.sigmoid(self.fc2(s))
-        return x * s
+        return x + x * s  # residual attention
 
 
 class ConvAutoencoderSE(nn.Module):
-    """
-    Parametric Conv AE with:
-      - multi-scale latent (concat pooled features from multiple encoder stages)
-      - channel attention (SE) per stage
-    Keeps same interface: forward() -> (recon, z), encode_only() -> z
-
-    NOTE:
-      input_hw should match your actual input H,W. For your case: (64,126).
-    """
-
     def __init__(
         self,
         in_channels: int = 1,
@@ -39,10 +40,14 @@ class ConvAutoencoderSE(nn.Module):
         padding: int = 1,
         use_bn: bool = True,
         normalize_latent: bool = True,
-        output_activation: str = "sigmoid",  # "sigmoid" or "none"
-        input_hw=(64, 126),                  # (H, W) used to build FC layers
-        attn_reduction: int = 16,            # SE reduction ratio
-        ms_stages=(1, 2),                    # which encoder stages to use for multiscale (0-based)
+        output_activation: str = "sigmoid",
+        input_hw=(64, 126),
+
+        # new knobs (safe defaults)
+        ms_stages=(0, 1, 2),          # use all stages by default
+        ms_pool: str = "avgmax",      # "avg" or "avgmax"
+        attn_type: str = "spatial",   # "spatial" or "se" or "none"
+        attn_reduction: int = 16,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -55,85 +60,84 @@ class ConvAutoencoderSE(nn.Module):
         self.normalize_latent = normalize_latent
         self.output_activation = output_activation.lower()
         self.input_hw = tuple(input_hw)
-        self.ms_stages = tuple(ms_stages)
 
-        # --- build encoder ---
-        enc_layers = []
-        bn_layers = []
-        attn_layers = []
+        self.ms_stages = tuple(ms_stages)
+        self.ms_pool = ms_pool.lower()
+        self.attn_type = attn_type.lower()
+
+        # --- encoder ---
+        self.enc_convs = nn.ModuleList()
+        self.enc_norms = nn.ModuleList()
+        self.enc_attn = nn.ModuleList()
+
         prev_c = in_channels
         for c in self.channels:
-            enc_layers.append(nn.Conv2d(prev_c, c, self.ks, stride=self.stride, padding=self.padding))
-            bn_layers.append(nn.BatchNorm2d(c) if use_bn else nn.Identity())
-            attn_layers.append(SqueezeExcite(c, reduction=attn_reduction))
-            prev_c = c
-        self.enc_convs = nn.ModuleList(enc_layers)
-        self.enc_bns = nn.ModuleList(bn_layers)
-        self.enc_attn = nn.ModuleList(attn_layers)
+            self.enc_convs.append(nn.Conv2d(prev_c, c, self.ks, stride=self.stride, padding=self.padding))
+            self.enc_norms.append(nn.BatchNorm2d(c) if use_bn else nn.Identity())
 
-        # --- compute stage shapes for input_hw (for decoder + optional sanity) ---
+            if self.attn_type == "spatial":
+                self.enc_attn.append(SpatialGate(c))
+            elif self.attn_type == "se":
+                self.enc_attn.append(ResidualSE(c, reduction=attn_reduction))
+            else:
+                self.enc_attn.append(nn.Identity())
+
+            prev_c = c
+
+        # bottleneck shape for decoder
         h, w = self.input_hw
-        stage_hws = []
         for _ in self.channels:
             h = self._conv_out_dim(h, self.ks, self.stride, self.padding)
             w = self._conv_out_dim(w, self.ks, self.stride, self.padding)
-            stage_hws.append((h, w))
-        self._stage_hws = stage_hws
-
-        # bottleneck (last stage) sizes for decoder reshape
-        self._bottleneck_hw = self._stage_hws[-1]
+        self._bottleneck_hw = (h, w)
         self._bottleneck_c = self.channels[-1]
-        self._flat_dim = self._bottleneck_c * self._bottleneck_hw[0] * self._bottleneck_hw[1]
+        self._flat_dim = self._bottleneck_c * h * w
 
-        # --- multi-scale latent: GAP each selected stage, concat, then project to latent_dim ---
+        # multiscale projection
         ms_dim = 0
         for i, c in enumerate(self.channels):
             if i in self.ms_stages:
-                ms_dim += c
+                ms_dim += c * (2 if self.ms_pool == "avgmax" else 1)
         if ms_dim == 0:
-            raise ValueError(f"ms_stages={self.ms_stages} selects no stages. Use indices in [0..{len(self.channels)-1}].")
+            raise ValueError("ms_stages selects no stages.")
 
-        self.ms_proj = nn.Sequential(
-            nn.Linear(ms_dim, latent_dim),
-        )
+        self.ms_proj = nn.Linear(ms_dim, latent_dim)
 
-        # --- build decoder (same as before) ---
+        # --- decoder (same as before) ---
         self.fc_dec = nn.Linear(latent_dim, self._flat_dim)
 
-        dec_layers = []
-        dec_bn_layers = []
         rev_channels = list(self.channels)[::-1]
+        self.dec_convs = nn.ModuleList()
+        self.dec_norms = nn.ModuleList()
         for i in range(len(rev_channels) - 1):
-            in_c = rev_channels[i]
-            out_c = rev_channels[i + 1]
-            dec_layers.append(nn.ConvTranspose2d(in_c, out_c, self.ks, stride=self.stride, padding=self.padding))
-            dec_bn_layers.append(nn.BatchNorm2d(out_c) if use_bn else nn.Identity())
+            self.dec_convs.append(nn.ConvTranspose2d(rev_channels[i], rev_channels[i + 1],
+                                                    self.ks, stride=self.stride, padding=self.padding))
+            self.dec_norms.append(nn.BatchNorm2d(rev_channels[i + 1]) if use_bn else nn.Identity())
 
-        self.dec_convs = nn.ModuleList(dec_layers)
-        self.dec_bns = nn.ModuleList(dec_bn_layers)
-        self.dec_final = nn.ConvTranspose2d(
-            rev_channels[-1], in_channels, self.ks, stride=self.stride, padding=self.padding
-        )
+        self.dec_final = nn.ConvTranspose2d(rev_channels[-1], in_channels,
+                                            self.ks, stride=self.stride, padding=self.padding)
 
     @staticmethod
     def _conv_out_dim(in_dim: int, k: int, s: int, p: int, d: int = 1) -> int:
         return (in_dim + 2 * p - d * (k - 1) - 1) // s + 1
 
+    def _pool_stage(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B,C,H,W] -> [B,C] or [B,2C]
+        avg = x.mean(dim=(2, 3))
+        if self.ms_pool == "avgmax":
+            mx = x.amax(dim=(2, 3))
+            return torch.cat([avg, mx], dim=1)
+        return avg
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # collect multi-scale pooled vectors from selected stages
         pooled = []
-        for i, (conv, bn, attn) in enumerate(zip(self.enc_convs, self.enc_bns, self.enc_attn)):
-            x = conv(x)
-            x = bn(x)
-            x = F.relu(x, inplace=True)
+        for i, (conv, norm, attn) in enumerate(zip(self.enc_convs, self.enc_norms, self.enc_attn)):
+            x = F.relu(norm(conv(x)), inplace=True)
             x = attn(x)
-
             if i in self.ms_stages:
-                # GAP -> [B, C]
-                pooled.append(x.mean(dim=(2, 3)))
-
-        ms = torch.cat(pooled, dim=1)  # [B, sum(C_i)]
-        z = self.ms_proj(ms)           # [B, latent_dim]
+                pooled.append(self._pool_stage(x))
+        ms = torch.cat(pooled, dim=1)
+        z = self.ms_proj(ms)
         return z
 
     def decode(self, z: torch.Tensor, target_shape=None) -> torch.Tensor:
@@ -141,24 +145,21 @@ class ConvAutoencoderSE(nn.Module):
         h, w = self._bottleneck_hw
         x = x.view(-1, self._bottleneck_c, h, w)
 
-        for deconv, bn in zip(self.dec_convs, self.dec_bns):
-            x = deconv(x)
-            x = bn(x)
-            x = F.relu(x, inplace=True)
+        for deconv, norm in zip(self.dec_convs, self.dec_norms):
+            x = F.relu(norm(deconv(x)), inplace=True)
 
         x = self.dec_final(x)
         if self.output_activation == "sigmoid":
             x = torch.sigmoid(x)
-
         if target_shape is not None:
             x = F.interpolate(x, size=target_shape[-2:], mode="bilinear", align_corners=False)
         return x
 
     def forward(self, x: torch.Tensor):
-        z = self.encode(x)
-        if self.normalize_latent:
-            z = F.normalize(z, dim=1)
-        recon = self.decode(z, target_shape=x.shape)
+        z_raw = self.encode(x)
+        # decode from raw to avoid unit-norm constraint harming recon/gradients
+        recon = self.decode(z_raw, target_shape=x.shape)
+        z = F.normalize(z_raw, dim=1) if self.normalize_latent else z_raw
         return recon, z
 
     def encode_only(self, x: torch.Tensor) -> torch.Tensor:
