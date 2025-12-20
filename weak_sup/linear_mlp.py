@@ -10,56 +10,9 @@ from models.resnetEncoder import ResNetEncoder
 import torch.nn.functional as F
 from torch.utils.data import Subset, DataLoader
 from weak_sup.get_labels import select_n_per_class
-
-def train_head_only(model_cls, loader, optimizer, device, epochs=50):
-    model_cls.train()
-    # keep encoder frozen & stable
-    # model_cls.encoder.eval()
-
-    for epoch in range(epochs):
-        total = 0
-        correct = 0
-        total_loss = 0.0
-
-        for batch in loader:
-            x = batch["x1"].to(device).float()
-            y = batch["label"].to(device).long()
-
-            optimizer.zero_grad(set_to_none=True)
-            logits = model_cls(x)
-            loss = criterion(logits, y)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * x.size(0)
-            total += x.size(0)
-            pred = logits.argmax(dim=1)
-            correct += (pred == y).sum().item()
-
-        print(f"epoch {epoch+1:03d}  loss={total_loss/total:.4f}  acc={correct/total:.3f}")
-
-
-def eval_head_enc(model_cls, loader, device):
-    model_cls.eval()
-
-    total = 0
-    correct = 0
-    total_loss = 0.0
-
-    with torch.no_grad():
-        for batch in loader:
-            x = batch["x"].to(device).float()
-            y = batch["label"].to(device).long()
-
-            logits = model_cls(x)
-            loss = criterion(logits, y)
-
-            total_loss += loss.item() * x.size(0)
-            total += x.size(0)
-            pred = logits.argmax(dim=1)
-            correct += (pred == y).sum().item()
-
-    print(f"eval  loss={total_loss/total:.4f}  acc={correct/total:.3f}")
+from training.embedding import extract_embeddings, extract_embeddings_VAE
+from training.clustering_eval import evaluate_clustering, visualize_embeddings_tsne, per_class_cluster_report
+from weak_sup.weak_sup_utils import LinearHead, Classifier, train_head_only, eval_head_enc
 
 # ======================================================
 # Load config
@@ -104,12 +57,6 @@ test_loader = DataLoader(test_ds,
                          )
 
 
-class LinearHead(nn.Module):
-    def __init__(self, in_dim, n_classes):
-        super().__init__()
-        self.fc = nn.Linear(in_dim, n_classes)
-    def forward(self, z):
-        return self.fc(z)
 
 labeled_idx = select_n_per_class(train_ds, n_per_class=3, seed=0, min_conf=None, prefer_high_conf=True)
 labeled_loader = DataLoader(
@@ -120,20 +67,6 @@ labeled_loader = DataLoader(
 )
 print("Labeled set size:", len(labeled_idx))
 
-class Classifier(nn.Module):
-    def __init__(self, encoder, head):
-        super().__init__()
-        self.encoder = encoder
-        self.head = head
-        # for p in self.encoder.parameters():
-        #     p.requires_grad = False
-        encoder.eval()  # keep it in eval so BN/Dropout don't drift
-
-    def forward(self, x):
-        z = self.encoder.encode(x)          # [B, latent_dim]
-        z = F.normalize(z, dim=1)           # OK to normalize embeddings
-        logits = self.head(z)               # [B, n_classes]
-        return logits
 
 head = LinearHead(cfg.latent_dim, n_classes=len(label2id)).to(device)
 encoder = ResNetEncoder(latent_dim=cfg.latent_dim, depth="layer2", pretrained=True).to(device)
@@ -143,12 +76,12 @@ encoder.load_state_dict(state)
 model = Classifier(encoder, head).to(device)
 opt = torch.optim.AdamW([
     {"params": model.head.parameters(), "lr": 1e-3},
-    {"params": model.encoder.parameters(), "lr": 5e-5},
+    {"params": model.encoder.parameters(), "lr": 2e-5},
 ])
 criterion = nn.CrossEntropyLoss()
 
 
-train_head_only(model, labeled_loader, opt, device, epochs=500)
-eval_head_enc(model, test_loader, device)
+train_head_only(model, labeled_loader, opt, device, criterion, model, label2id, test_loader, epochs=181)
+eval_head_enc(model, test_loader, criterion, device)
 
 print(1)

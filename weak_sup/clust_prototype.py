@@ -2,7 +2,7 @@
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score
-
+import numpy as np
 from config import Config
 from data.data_access import get_train_test_clips_n_labels, create_label_map
 from data.dataset import UrbanSoundDataset
@@ -83,11 +83,11 @@ for k, res in all_results.items():
 Z, y_true, idx_all = extract_embeddings_all(encoder, test_loader, device, normalize=True)
 print(Z.shape, y_true.shape, idx_all.shape)
 
-anchors = anchors_from_arrays(idx_all, y_true, n_per_class=9)
+anchors = anchors_from_arrays(idx_all, y_true, n_per_class=5)
 print({c: len(v) for c, v in anchors.items()})
 
 protos = compute_prototypes(Z, idx_all, anchors)
-pred, margin, sim = prototype_predict(Z, protos, reject_margin=0.001)
+pred, margin, sim = prototype_predict(Z, protos, reject_margin=0.05)
 
 reject_rate = (pred == -1).mean()
 print("reject_rate:", reject_rate)
@@ -98,6 +98,7 @@ print("NMI:", normalized_mutual_info_score(y_true[mask], pred[mask]))
 print("ARI:", adjusted_rand_score(y_true[mask], pred[mask]))
 
 pred, conf = knn_predict(Z, idx_all, anchors)
-mask = pred != -1
-print("NMI:", normalized_mutual_info_score(y_true[mask], pred[mask]))
-print("ARI:", adjusted_rand_score(y_true[mask], pred[mask]))
+mask = np.ones_like(pred)
+print("NMI:", normalized_mutual_info_score(y_true, pred))
+print("ARI:", adjusted_rand_score(y_true, pred))
+print()

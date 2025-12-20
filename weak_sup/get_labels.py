@@ -86,3 +86,9 @@ def select_n_per_class(ds, n_per_class=3, seed=0, min_conf=None, prefer_high_con
     return indices
 
 
+def anchors_from_labeled_indices(ds, labeled_indices):
+    anchors = defaultdict(list)
+    for i in labeled_indices:
+        y = int(ds[i]["label"])
+        anchors[y].append(int(i))
+    return dict(anchors)
