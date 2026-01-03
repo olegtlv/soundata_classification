@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 
-def contrastive_loss(z1, z2, temperature=0.1, weights=None):
+def contrastive_loss(z1, z2, temperature=0.1, weights=None, normalize=True):
     """
     SimCLR NT-Xent loss.
 
@@ -14,8 +14,9 @@ def contrastive_loss(z1, z2, temperature=0.1, weights=None):
     Returns: scalar loss.
     """
     # Normalize embeddings
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
+    if normalize:
+        z1 = F.normalize(z1, dim=1)
+        z2 = F.normalize(z2, dim=1)
 
     B = z1.size(0)
     device = z1.device
@@ -29,7 +30,7 @@ def contrastive_loss(z1, z2, temperature=0.1, weights=None):
 
     # Mask out self-similarity
     mask = torch.eye(2 * B, dtype=torch.bool, device=device)
-    sim = sim.masked_fill(mask, -9e15)
+    sim = sim.masked_fill(mask, float("-inf"))
 
     # Positive index for each sample:
     # for i in [0..B-1], positive is i+B

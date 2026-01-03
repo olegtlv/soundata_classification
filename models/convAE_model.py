@@ -114,5 +114,5 @@ class ConvAutoencoder(nn.Module):
 
     def encode_only(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encode(x)
-        # return F.normalize(z, dim=1) if self.normalize_latent els1e z
-        return F.normalize(z, dim=1)
+        return F.normalize(z, dim=1) if self.normalize_latent else z
+        # return F.normalize(z, dim=1)

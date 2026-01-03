@@ -1,6 +1,17 @@
 from torch import nn
 from config import Config
 import torch.nn.functional as F
+import torch
+
+class Prototypes(nn.Module):
+    def __init__(self, in_dim, num_prototypes):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(num_prototypes, in_dim) * 0.01)
+
+    def forward(self, x):  # x: [B,D]
+        x = F.normalize(x, dim=1)
+        w = F.normalize(self.weight, dim=1)
+        return x @ w.t()  # logits: [B, K]
 
 
 # class SimCLRModel(nn.Module):
@@ -27,9 +38,12 @@ class SimCLRModel(nn.Module):
     - projector: 3-layer MLP head (SimCLR-style)
     """
     def __init__(self, ae_backbone, latent_dim=128,
-                 proj_dim=128, hidden_dim=256):
+                 proj_dim=128, hidden_dim=256, normalize_latent=False,
+                 num_prototypes=256):
         super().__init__()
         self.encoder = ae_backbone
+        self.normalize_latent = normalize_latent
+        self.prototypes = Prototypes(in_dim=proj_dim, num_prototypes=num_prototypes)
 
         # SimCLR-style projector: z -> p
         self.projector = nn.Sequential(
@@ -40,7 +54,6 @@ class SimCLRModel(nn.Module):
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, proj_dim),
-            nn.BatchNorm1d(proj_dim),
         )
 
     def forward(self, x):
@@ -52,3 +65,7 @@ class SimCLRModel(nn.Module):
         p = F.normalize(p, dim=1)
 
         return p
+
+    def encode_only(self, x):
+        z = self.encoder.encode(x)
+        return F.normalize(z, dim=1) if self.normalize_latent else z

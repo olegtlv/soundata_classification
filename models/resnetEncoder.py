@@ -3,6 +3,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet18
+class GeM(nn.Module):
+    def __init__(self, p=3.0, eps=1e-6, trainable=False):
+        super().__init__()
+        if trainable:
+            self.p = nn.Parameter(torch.tensor(float(p)))
+        else:
+            self.register_buffer("p", torch.tensor(float(p)))
+        self.eps = eps
+
+    def forward(self, x):
+        # x: [B, C, H, W]
+        p = self.p.clamp(min=1.0)
+        x = x.clamp(min=self.eps).pow(p)
+        x = x.mean(dim=(2, 3), keepdim=True).pow(1.0 / p)
+        return x
 
 
 class ResNetEncoder(nn.Module):
@@ -55,21 +70,22 @@ class ResNetEncoder(nn.Module):
             layers.append(base.layer4)
             out_channels = 512
 
-        old_conv = base.conv1  # [out_c=64, in_c=3, ...]
-        base.conv1 = nn.Conv2d(
-            1,
-            old_conv.out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            bias=False,
-        )
-        if pretrained:
-            with torch.no_grad():
-                base.conv1.weight.copy_(old_conv.weight.mean(dim=1, keepdim=True))
+        # old_conv = base.conv1  # [out_c=64, in_c=3, ...]
+        # base.conv1 = nn.Conv2d(
+        #     1,
+        #     old_conv.out_channels,
+        #     kernel_size=old_conv.kernel_size,
+        #     stride=old_conv.stride,
+        #     padding=old_conv.padding,
+        #     bias=False,
+        # )
+        # if pretrained:
+        #     with torch.no_grad():
+        #         base.conv1.weight.copy_(old_conv.weight.mean(dim=1, keepdim=True))
 
         self.features = nn.Sequential(*layers)
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        # self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool = GeM(p=3.0, trainable=False)  # try p=3 or 4
         self.fc = nn.Linear(out_channels, latent_dim)
 
     def encode(self, x):
@@ -84,3 +100,6 @@ class ResNetEncoder(nn.Module):
         # match your ConvAE interface: return (recon, z)
         z = self.encode(x)
         return None, z
+
+    def encode_only(self, x):
+        return self.encode(x)
